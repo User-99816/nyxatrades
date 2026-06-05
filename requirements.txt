@@ -4,3 +4,4 @@ supabase
 python-jose[cryptography]
 python-dotenv
 websockets
+pandas
