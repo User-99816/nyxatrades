@@ -36,6 +36,7 @@ def create_download_token(license_key: str, email: str):
 
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
+    # Store token (anti-sharing system)
     try:
         supabase.table("download_tokens").insert({
             "token": token,
@@ -61,14 +62,14 @@ def verify_download_token(token: str):
         return {"valid": False, "error": "MISSING_TOKEN"}
 
     try:
-        # 1. Decode JWT
+        # Decode JWT
         payload = jwt.decode(
             token,
             SECRET_KEY,
             algorithms=[ALGORITHM]
         )
 
-        # 2. Fetch token from DB (SAFE QUERY)
+        # Fetch token from DB
         result = (
             supabase.table("download_tokens")
             .select("*")
@@ -82,7 +83,7 @@ def verify_download_token(token: str):
 
         record = result.data[0]
 
-        # 3. Block reused tokens
+        # Block reused token
         if record.get("used") is True:
             return {"valid": False, "error": "TOKEN_ALREADY_USED"}
 
@@ -98,7 +99,7 @@ def verify_download_token(token: str):
             "error": f"JWT_INVALID: {str(e)}"
         }
 
-    except Exception as e:
+    except Exception:
         return {
             "valid": False,
             "error": "TOKEN_VERIFICATION_FAILED"
@@ -147,9 +148,7 @@ def log_download(license_key: str, email: str, ip_address: str, user_agent: str)
 def validate_download_license(email: str, license_key: str):
 
     try:
-        # IMPORTANT FIX:
-        # we validate using api_key (NOT license_key column)
-
+        # IMPORTANT: validate using api_key column
         result = (
             supabase.table("licenses")
             .select("*")
@@ -169,7 +168,7 @@ def validate_download_license(email: str, license_key: str):
         license_data = result.data[0]
 
         # ==========================================
-        # EXPIRY CHECK (SAFE)
+        # EXPIRY CHECK
         # ==========================================
 
         expires_at = license_data.get("expires_at")
@@ -194,7 +193,7 @@ def validate_download_license(email: str, license_key: str):
             "license": license_data
         }
 
-    except Exception as e:
+    except Exception:
         return {
             "valid": False,
             "reason": "LICENSE_VALIDATION_ERROR"

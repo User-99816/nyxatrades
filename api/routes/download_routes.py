@@ -57,7 +57,7 @@ def generate_download(payload: dict):
 
 
 # ==========================================
-# DOWNLOAD EA (SAFE + FALLBACK MODE)
+# DOWNLOAD EA (HYBRID SAFE MODE + SECURE MODE)
 # ==========================================
 
 @router.get("/ea")
@@ -69,8 +69,9 @@ async def download_ea(
     ea_file = Path("downloads/nyxatrades_ea.ex5")
 
     # ==========================================
-    # SAFE MODE: If NO TOKEN → STILL ALLOW DOWNLOAD (MVP MODE)
+    # SAFE MODE (NO TOKEN = ALLOW DOWNLOAD)
     # ==========================================
+    # This prevents "missing token" blocking your users in production MVP
 
     if not token:
 
@@ -94,7 +95,7 @@ async def download_ea(
         )
 
     # ==========================================
-    # SECURE MODE (ONLY IF TOKEN PROVIDED)
+    # SECURE MODE (TOKEN PROVIDED)
     # ==========================================
 
     verification = verify_download_token(token)
@@ -111,8 +112,10 @@ async def download_ea(
     license_key = data["license_key"]
     email = data["email"]
 
+    # Mark token as used (anti-sharing protection)
     mark_token_used(token)
 
+    # Log download event
     log_download(
         license_key=license_key,
         email=email,
@@ -120,12 +123,14 @@ async def download_ea(
         user_agent=request.headers.get("user-agent", "unknown")
     )
 
+    # Check file existence
     if not ea_file.exists():
         return {
             "allowed": False,
             "message": "EA File Not Found"
         }
 
+    # Return actual EA file download
     return FileResponse(
         path=str(ea_file),
         filename="NyxaTradesEA.ex5",
