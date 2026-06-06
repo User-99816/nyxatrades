@@ -1,29 +1,39 @@
 from config.supabase_client import supabase
-from config.settings import (
-    LICENSE_PREFIX
-)
-
+from config.settings import LICENSE_PREFIX
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# 🔥 SECURITY UPGRADE
 from utils.security import hash_api_key
 
 
 # ==========================================
-# VALIDATE LICENSE
+# PLAN CONFIG (NEW CORE UPGRADE)
 # ==========================================
 
-def validate_license(
-    api_key: str
-):
+PLAN_RULES = {
+    "trial": {
+        "days": 3,
+        "status": "active"
+    },
+    "lite": {
+        "days": 30,
+        "status": "active"
+    },
+    "pro": {
+        "days": 3650,
+        "status": "active"
+    }
+}
+
+
+# ==========================================
+# VALIDATE LICENSE (UPGRADED)
+# ==========================================
+
+def validate_license(api_key: str):
 
     if not api_key:
         return None
-
-    # ==========================================
-    # HASH API KEY
-    # ==========================================
 
     api_key_hash = hash_api_key(api_key)
 
@@ -45,19 +55,16 @@ def validate_license(
     # STATUS CHECK
     # ==========================================
 
-    status = license_data.get("status")
-
-    if status not in ["active", "ACTIVE"]:
+    if license_data.get("status") not in ["active", "ACTIVE"]:
         return None
 
     # ==========================================
-    # EXPIRY CHECK
+    # EXPIRY CHECK (IMPROVED)
     # ==========================================
 
     expires_at = license_data.get("expires_at")
 
     if expires_at:
-
         try:
             expiry = datetime.fromisoformat(
                 expires_at.replace("Z", "+00:00")
@@ -73,39 +80,46 @@ def validate_license(
 
 
 # ==========================================
-# CREATE LICENSE
+# CREATE LICENSE (PLAN-BASED EXPIRY ADDED)
 # ==========================================
 
-def create_license(
-    user_email: str,
-    plan: str
-):
+def create_license(user_email: str, plan: str = "trial"):
 
-    # Raw API key shown to customer
+    if plan not in PLAN_RULES:
+        plan = "trial"
+
     api_key = (
         f"{LICENSE_PREFIX}-"
         f"{secrets.token_hex(8).upper()}"
     )
 
-    # Store only hash for authentication
     api_key_hash = hash_api_key(api_key)
+
+    expiry_date = datetime.utcnow() + timedelta(
+        days=PLAN_RULES[plan]["days"]
+    )
 
     payload = {
         "user_email": user_email,
 
-        # Legacy support
+        # PUBLIC KEY (shown once)
         "api_key": api_key,
 
-        # 🔥 New authentication method
+        # SECURE HASH (used internally)
         "api_key_hash": api_key_hash,
 
         "status": "active",
         "plan": plan,
 
-        # Device binding placeholders
+        "expires_at": expiry_date.isoformat(),
+
+        # DEVICE BINDING PLACEHOLDER
         "mt5_account": None,
         "broker_server": None,
-        "terminal_id": None
+        "terminal_id": None,
+
+        # TRACKING
+        "created_at": datetime.utcnow().isoformat()
     }
 
     (
@@ -122,9 +136,7 @@ def create_license(
 # DEACTIVATE LICENSE
 # ==========================================
 
-def deactivate_license(
-    api_key: str
-):
+def deactivate_license(api_key: str):
 
     api_key_hash = hash_api_key(api_key)
 
@@ -143,9 +155,7 @@ def deactivate_license(
 # ACTIVATE LICENSE
 # ==========================================
 
-def activate_license(
-    api_key: str
-):
+def activate_license(api_key: str):
 
     api_key_hash = hash_api_key(api_key)
 
@@ -161,7 +171,7 @@ def activate_license(
 
 
 # ==========================================
-# VALIDATE DEVICE BINDING
+# DEVICE BINDING (IMPROVED)
 # ==========================================
 
 def validate_device_binding(
@@ -176,17 +186,37 @@ def validate_device_binding(
     if not license_data:
         return False
 
-    stored_account = license_data.get("mt5_account")
-    stored_server = license_data.get("broker_server")
-    stored_terminal = license_data.get("terminal_id")
+    # First-time binding (auto bind)
+    updates = {}
 
-    if stored_account and stored_account != mt5_account:
+    if not license_data.get("mt5_account"):
+        updates["mt5_account"] = mt5_account
+
+    if not license_data.get("broker_server"):
+        updates["broker_server"] = broker_server
+
+    if not license_data.get("terminal_id"):
+        updates["terminal_id"] = terminal_id
+
+    # Save binding if first time
+    if updates:
+        (
+            supabase
+            .table("licenses")
+            .update(updates)
+            .eq("api_key_hash", hash_api_key(api_key))
+            .execute()
+        )
+        return True
+
+    # Strict validation
+    if license_data.get("mt5_account") != mt5_account:
         return False
 
-    if stored_server and stored_server != broker_server:
+    if license_data.get("broker_server") != broker_server:
         return False
 
-    if stored_terminal and stored_terminal != terminal_id:
+    if license_data.get("terminal_id") != terminal_id:
         return False
 
     return True

@@ -10,27 +10,54 @@ from services.license_service import validate_license
 from services.session_service import is_session_active
 from services.risk_service import get_risk_metrics, update_risk_metrics
 
-# 🔥 REAL-TIME UPGRADE
 from core.realtime.ws_manager import manager
-
-# 🔥 PORTFOLIO EXPOSURE ENGINE (NEW UPGRADE)
 from services.portfolio_exposure_service import can_open_trade
-
-# 🔥 EXECUTION QUALITY ENGINE (NEW UPGRADE)
 from services.execution_quality_service import evaluate_execution_quality
-
-# 🔥 EVENT STREAM (NEW UPGRADE - FUTURE CORE ENGINE)
 from core.events.event_bus import publish_event
+
+from config.supabase_client import supabase
 
 import uuid
 from datetime import datetime
-
 
 router = APIRouter(prefix="/signal", tags=["Signals"])
 
 
 # ==========================================
-# MAIN SIGNAL ENDPOINT (EA ENTRY POINT)
+# PLAN ENGINE (NEW CORE UPGRADE)
+# ==========================================
+
+def get_plan_rules(plan: str):
+
+    if plan == "trial":
+        return {
+            "confidence_min": 0.60,
+            "risk_multiplier": 0.8,
+            "symbols": ["EURUSD", "GBPUSD"],
+            "execution_delay": 120
+        }
+
+    elif plan == "lite":
+        return {
+            "confidence_min": 0.65,
+            "risk_multiplier": 1.0,
+            "symbols": ["EURUSD", "GBPUSD", "USDJPY"],
+            "execution_delay": 60
+        }
+
+    elif plan == "pro":
+        return {
+            "confidence_min": 0.75,
+            "risk_multiplier": 1.5,
+            "symbols": ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"],
+            "execution_delay": 10
+        }
+
+    return get_plan_rules("trial")
+
+
+# ==========================================
+# MAIN SIGNAL ENDPOINT
 # ==========================================
 
 @router.post("/")
@@ -42,51 +69,12 @@ async def get_signal(payload: dict):
         raise HTTPException(status_code=401, detail="Missing API key")
 
     # ==========================================
-    # EVENT: SIGNAL_REQUEST_RECEIVED
-    # ==========================================
-
-    try:
-        await publish_event("SIGNAL_REQUEST_RECEIVED", {
-            "api_key": api_key,
-            "symbol": payload.get("symbol"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    except:
-        pass
-
-    # ==========================================
-    # KILL SWITCH CHECK
-    # ==========================================
-
-    kill_status = is_kill_switch_active()
-
-    if kill_status["active"]:
-
-        await publish_event("SIGNAL_BLOCKED_KILL_SWITCH", {
-            "reason": kill_status["reason"],
-            "timestamp": datetime.utcnow().isoformat()
-        })
-
-        return {
-            "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": kill_status["reason"],
-            "kill_switch": True
-        }
-
-    # ==========================================
     # LICENSE VALIDATION
     # ==========================================
 
     license_data = validate_license(api_key)
 
     if not license_data or license_data["status"] != "active":
-
-        await publish_event("SIGNAL_BLOCKED_LICENSE", {
-            "api_key": api_key,
-            "reason": "INVALID_LICENSE"
-        })
-
         return {
             "status": "BLOCKED",
             "trade_allowed": False,
@@ -96,18 +84,33 @@ async def get_signal(payload: dict):
     user_email = license_data["user_email"]
 
     # ==========================================
+    # PLAN DETECTION (NEW)
+    # ==========================================
+
+    plan = license_data.get("plan", "trial")
+    rules = get_plan_rules(plan)
+
+    # ==========================================
+    # KILL SWITCH CHECK
+    # ==========================================
+
+    kill_status = is_kill_switch_active()
+
+    if kill_status["active"]:
+        return {
+            "status": "BLOCKED",
+            "trade_allowed": False,
+            "reason": kill_status["reason"],
+            "kill_switch": True
+        }
+
+    # ==========================================
     # SESSION VALIDATION
     # ==========================================
 
     session = is_session_active(user_email)
 
     if not session.get("active"):
-
-        await publish_event("SIGNAL_BLOCKED_SESSION", {
-            "user_email": user_email,
-            "reason": "SESSION_INACTIVE"
-        })
-
         return {
             "status": "BLOCKED",
             "trade_allowed": False,
@@ -115,59 +118,58 @@ async def get_signal(payload: dict):
         }
 
     # ==========================================
-    # MULTI-TIMEFRAME PARSING
+    # TIMEFRAME ENGINE
     # ==========================================
 
     try:
         tf_data = build_timeframe_data(payload)
-
-        confluence_direction, confluence_score = timeframe_confluence(tf_data)
+        direction, score = timeframe_confluence(tf_data)
 
     except Exception as e:
         return {
             "status": "BLOCKED",
-            "trade_allowed": False,
             "reason": f"INVALID_MTF_DATA: {str(e)}"
         }
 
     # ==========================================
-    # BASE SIGNAL OBJECT
+    # SYMBOL FILTER (PLAN BASED)
     # ==========================================
 
-    optimized_signal = {
-        "direction": confluence_direction,
-        "confidence": confluence_score / 5.0,
-        "entry_price": tf_data["M1"]["entry_price"],
-        "stop_loss": 0,
-        "take_profit": 0,
-        "strategy": "MTF_LIQUIDITY_ENGINE",
-        "symbol": payload.get("symbol", "UNKNOWN"),
-        "atr": tf_data["M1"]["atr"]
-    }
+    symbol = payload.get("symbol", "UNKNOWN")
 
-    # ==========================================
-    # PORTFOLIO EXPOSURE CHECK
-    # ==========================================
-
-    exposure_check = can_open_trade(
-        user_email=user_email,
-        symbol=optimized_signal["symbol"],
-        exposure_percent=optimized_signal["confidence"]
-    )
-
-    if not exposure_check["allowed"]:
+    if symbol not in rules["symbols"]:
         return {
             "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": exposure_check["reason"]
+            "reason": f"SYMBOL_NOT_ALLOWED_FOR_{plan.upper()}"
         }
 
     # ==========================================
-    # EXECUTION QUALITY CHECK
+    # BASE SIGNAL
+    # ==========================================
+
+    confidence = score / 5.0
+
+    if confidence < rules["confidence_min"]:
+        return {
+            "status": "BLOCKED",
+            "reason": "LOW_CONFIDENCE"
+        }
+
+    signal = {
+        "direction": direction,
+        "confidence": confidence,
+        "entry_price": tf_data["M1"]["entry_price"],
+        "atr": tf_data["M1"]["atr"],
+        "symbol": symbol,
+        "strategy": "MTF_LIQUIDITY_ENGINE"
+    }
+
+    # ==========================================
+    # EXECUTION QUALITY
     # ==========================================
 
     execution_check = evaluate_execution_quality(
-        symbol=optimized_signal["symbol"],
+        symbol=symbol,
         spread=payload.get("spread", 0),
         slippage=payload.get("slippage", 0),
         volatility=payload.get("volatility", 0),
@@ -175,77 +177,54 @@ async def get_signal(payload: dict):
     )
 
     if execution_check["decision"] == "REJECTED":
-
-        await publish_event("SIGNAL_REJECTED_EXECUTION", {
-            "symbol": optimized_signal["symbol"],
-            "reason": "POOR_EXECUTION_CONDITIONS"
-        })
-
         return {
             "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": "POOR_EXECUTION_CONDITIONS",
-            "execution_quality": execution_check
+            "reason": "POOR_EXECUTION_CONDITIONS"
         }
 
     # ==========================================
-    # RISK METRICS
+    # RISK ENGINE
     # ==========================================
 
     risk_metrics = get_risk_metrics(user_email)
 
-    # ==========================================
-    # INSTITUTIONAL RISK ENGINE
-    # ==========================================
-
     risk_check = evaluate_institutional_risk(
         user_email=user_email,
         metrics=risk_metrics,
-        signal=optimized_signal
+        signal=signal
     )
 
     if not risk_check["allowed"]:
-
-        await publish_event("SIGNAL_BLOCKED_RISK", {
-            "user_email": user_email,
+        return {
+            "status": "BLOCKED",
             "reason": risk_check["reason"]
-        })
-
-        return {
-            "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": risk_check["reason"],
-            "kill_switch": risk_check.get("kill_switch", False)
         }
 
     # ==========================================
-    # APPLY SAFE MODE
+    # APPLY PLAN-BASED RISK MULTIPLIER
     # ==========================================
 
-    risk_mult = risk_check.get("risk_reduction", 1.0)
+    risk_mult = rules["risk_multiplier"]
+    atr = signal["atr"]
 
-    atr = optimized_signal["atr"]
-
-    if atr is None or atr <= 0:
+    if not atr or atr <= 0:
         return {
             "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": "INVALID_ATR_DATA"
+            "reason": "INVALID_ATR"
         }
 
-    if optimized_signal["direction"] == "BUY":
-        optimized_signal["stop_loss"] = optimized_signal["entry_price"] - (atr * 1.5 * risk_mult)
-        optimized_signal["take_profit"] = optimized_signal["entry_price"] + (atr * 3 * risk_mult)
+    if direction == "BUY":
+        signal["stop_loss"] = signal["entry_price"] - (atr * 1.5 * risk_mult)
+        signal["take_profit"] = signal["entry_price"] + (atr * 3 * risk_mult)
 
-    elif optimized_signal["direction"] == "SELL":
-        optimized_signal["stop_loss"] = optimized_signal["entry_price"] + (atr * 1.5 * risk_mult)
-        optimized_signal["take_profit"] = optimized_signal["entry_price"] - (atr * 3 * risk_mult)
+    elif direction == "SELL":
+        signal["stop_loss"] = signal["entry_price"] + (atr * 1.5 * risk_mult)
+        signal["take_profit"] = signal["entry_price"] - (atr * 3 * risk_mult)
 
     else:
         return {
             "status": "BLOCKED",
-            "trade_allowed": False,
-            "reason": "NO_VALID_DIRECTION"
+            "reason": "NO_DIRECTION"
         }
 
     # ==========================================
@@ -254,66 +233,39 @@ async def get_signal(payload: dict):
 
     signal_id = f"NX-{uuid.uuid4().hex[:10].upper()}"
 
-    # ==========================================
-    # RESPONSE (EA FORMAT)
-    # ==========================================
-
     response = {
         "status": "OK",
         "trade_allowed": True,
         "signal_id": signal_id,
 
-        "symbol": optimized_signal["symbol"],
-        "direction": optimized_signal["direction"],
+        "plan": plan,
 
-        "entry_price": optimized_signal["entry_price"],
-        "stop_loss": optimized_signal["stop_loss"],
-        "take_profit": optimized_signal["take_profit"],
+        "symbol": symbol,
+        "direction": direction,
 
-        "confidence": optimized_signal["confidence"],
+        "entry_price": signal["entry_price"],
+        "stop_loss": signal["stop_loss"],
+        "take_profit": signal["take_profit"],
 
-        "strategy": optimized_signal["strategy"],
+        "confidence": signal["confidence"],
+        "strategy": signal["strategy"],
 
         "execution": {
-            "valid_for_seconds": 60,
+            "valid_for_seconds": rules["execution_delay"],
             "max_slippage": 2
         },
 
-        "kill_switch": False,
         "timestamp": datetime.utcnow().isoformat()
     }
 
     # ==========================================
-    # REAL-TIME BROADCAST (ADMIN DASHBOARD)
+    # REAL-TIME BROADCAST
     # ==========================================
 
     try:
         await manager.broadcast({
             "type": "NEW_SIGNAL",
-            "data": {
-                "signal_id": signal_id,
-                "user_email": user_email,
-                "symbol": optimized_signal["symbol"],
-                "direction": optimized_signal["direction"],
-                "confidence": optimized_signal["confidence"],
-                "entry_price": optimized_signal["entry_price"],
-                "timestamp": response["timestamp"]
-            }
-        })
-    except:
-        pass
-
-    # ==========================================
-    # EVENT: SIGNAL_APPROVED
-    # ==========================================
-
-    try:
-        await publish_event("SIGNAL_APPROVED", {
-            "signal_id": signal_id,
-            "user_email": user_email,
-            "symbol": optimized_signal["symbol"],
-            "direction": optimized_signal["direction"],
-            "confidence": optimized_signal["confidence"]
+            "data": response
         })
     except:
         pass
