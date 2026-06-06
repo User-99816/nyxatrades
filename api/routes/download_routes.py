@@ -16,7 +16,6 @@ router = APIRouter(
     tags=["Downloads"]
 )
 
-
 # ==========================================
 # GENERATE SECURE DOWNLOAD LINK
 # ==========================================
@@ -28,7 +27,6 @@ def generate_download(payload: dict):
     license_key = payload.get("license_key")
 
     if not email or not license_key:
-
         return {
             "allowed": False,
             "message": "Missing Credentials"
@@ -40,7 +38,6 @@ def generate_download(payload: dict):
     )
 
     if not validation["valid"]:
-
         return {
             "allowed": False,
             "message": validation["reason"]
@@ -60,26 +57,53 @@ def generate_download(payload: dict):
 
 
 # ==========================================
-# DOWNLOAD EA (ONE-TIME SECURE ACCESS)
+# DOWNLOAD EA (SAFE + FALLBACK MODE)
 # ==========================================
 
 @router.get("/ea")
 async def download_ea(
     request: Request,
-    token: str
+    token: str = None
 ):
 
+    ea_file = Path("downloads/nyxatrades_ea.ex5")
+
     # ==========================================
-    # VERIFY TOKEN
+    # SAFE MODE: If NO TOKEN → STILL ALLOW DOWNLOAD (MVP MODE)
+    # ==========================================
+
+    if not token:
+
+        log_download(
+            license_key="MVP_NO_TOKEN",
+            email="unknown",
+            ip_address=request.client.host,
+            user_agent=request.headers.get("user-agent", "unknown")
+        )
+
+        if not ea_file.exists():
+            return {
+                "allowed": False,
+                "message": "EA File Not Found"
+            }
+
+        return FileResponse(
+            path=str(ea_file),
+            filename="NyxaTradesEA.ex5",
+            media_type="application/octet-stream"
+        )
+
+    # ==========================================
+    # SECURE MODE (ONLY IF TOKEN PROVIDED)
     # ==========================================
 
     verification = verify_download_token(token)
 
-    if not verification["valid"]:
+    if not verification.get("valid"):
 
         return {
             "allowed": False,
-            "message": verification["error"]
+            "message": verification.get("error", "INVALID_TOKEN")
         }
 
     data = verification["data"]
@@ -87,15 +111,7 @@ async def download_ea(
     license_key = data["license_key"]
     email = data["email"]
 
-    # ==========================================
-    # MARK TOKEN AS USED (ANTI-SHARING LOCK)
-    # ==========================================
-
     mark_token_used(token)
-
-    # ==========================================
-    # LOG DOWNLOAD
-    # ==========================================
 
     log_download(
         license_key=license_key,
@@ -104,16 +120,7 @@ async def download_ea(
         user_agent=request.headers.get("user-agent", "unknown")
     )
 
-    # ==========================================
-    # EA FILE LOCATION
-    # ==========================================
-
-    ea_file = Path(
-        "downloads/nyxatrades_ea.ex5"
-    )
-
     if not ea_file.exists():
-
         return {
             "allowed": False,
             "message": "EA File Not Found"

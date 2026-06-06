@@ -1,10 +1,7 @@
 import os
-
 from datetime import datetime, timedelta
 
-from jose import jwt
-from jose import JWTError
-
+from jose import jwt, JWTError
 from config.supabase_client import supabase
 
 
@@ -15,47 +12,29 @@ from config.supabase_client import supabase
 SECRET_KEY = os.getenv("DOWNLOAD_SECRET_KEY")
 
 if not SECRET_KEY:
-    raise RuntimeError(
-        "DOWNLOAD_SECRET_KEY environment variable is missing"
-    )
+    raise RuntimeError("DOWNLOAD_SECRET_KEY environment variable is missing")
 
 ALGORITHM = "HS256"
 
 DOWNLOAD_EXPIRY_MINUTES = int(
-    os.getenv(
-        "DOWNLOAD_EXPIRY_MINUTES",
-        "10"
-    )
+    os.getenv("DOWNLOAD_EXPIRY_MINUTES", "10")
 )
 
 
 # ==========================================
-# CREATE DOWNLOAD TOKEN (ONE-TIME ENABLED)
+# CREATE DOWNLOAD TOKEN
 # ==========================================
 
-def create_download_token(
-    license_key: str,
-    email: str
-):
+def create_download_token(license_key: str, email: str):
 
     payload = {
         "license_key": license_key,
         "email": email,
         "type": "ea_download",
-        "exp": datetime.utcnow() + timedelta(
-            minutes=DOWNLOAD_EXPIRY_MINUTES
-        )
+        "exp": datetime.utcnow() + timedelta(minutes=DOWNLOAD_EXPIRY_MINUTES)
     }
 
-    token = jwt.encode(
-        payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
-
-    # ==========================================
-    # STORE TOKEN (ANTI-SHARING SYSTEM)
-    # ==========================================
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
     try:
         supabase.table("download_tokens").insert({
@@ -67,50 +46,45 @@ def create_download_token(
         }).execute()
 
     except Exception as e:
-        print(f"[TOKEN STORE ERROR] {str(e)}")
+        print(f"[TOKEN STORE ERROR] {e}")
 
     return token
 
 
 # ==========================================
-# VERIFY TOKEN (WITH ANTI-REUSE CHECK)
+# VERIFY TOKEN (ROBUST + SAFE)
 # ==========================================
 
-def verify_download_token(
-    token: str
-):
+def verify_download_token(token: str):
+
+    if not token:
+        return {"valid": False, "error": "MISSING_TOKEN"}
 
     try:
-
-        # 1. Validate JWT
+        # 1. Decode JWT
         payload = jwt.decode(
             token,
             SECRET_KEY,
             algorithms=[ALGORITHM]
         )
 
-        # 2. Check DB record
+        # 2. Fetch token from DB (SAFE QUERY)
         result = (
             supabase.table("download_tokens")
             .select("*")
             .eq("token", token)
+            .limit(1)
             .execute()
         )
 
         if not result.data:
-            return {
-                "valid": False,
-                "error": "TOKEN_NOT_FOUND"
-            }
+            return {"valid": False, "error": "TOKEN_NOT_FOUND"}
 
         record = result.data[0]
 
-        # 3. BLOCK IF ALREADY USED
-        if record.get("used"):
-            return {
-                "valid": False,
-                "error": "TOKEN_ALREADY_USED"
-            }
+        # 3. Block reused tokens
+        if record.get("used") is True:
+            return {"valid": False, "error": "TOKEN_ALREADY_USED"}
 
         return {
             "valid": True,
@@ -127,43 +101,34 @@ def verify_download_token(
     except Exception as e:
         return {
             "valid": False,
-            "error": str(e)
+            "error": "TOKEN_VERIFICATION_FAILED"
         }
 
 
 # ==========================================
-# MARK TOKEN AS USED (ONE-TIME SYSTEM)
+# MARK TOKEN AS USED
 # ==========================================
 
 def mark_token_used(token: str):
 
     try:
-
         supabase.table("download_tokens").update({
             "used": True,
             "used_at": datetime.utcnow().isoformat()
         }).eq("token", token).execute()
 
     except Exception as e:
-        print(f"[TOKEN UPDATE ERROR] {str(e)}")
+        print(f"[TOKEN UPDATE ERROR] {e}")
 
 
 # ==========================================
 # LOG DOWNLOAD
 # ==========================================
 
-def log_download(
-    license_key: str,
-    email: str,
-    ip_address: str,
-    user_agent: str
-):
+def log_download(license_key: str, email: str, ip_address: str, user_agent: str):
 
     try:
-
-        supabase.table(
-            "download_logs"
-        ).insert({
+        supabase.table("download_logs").insert({
             "license_key": license_key,
             "email": email,
             "ip_address": ip_address,
@@ -172,34 +137,30 @@ def log_download(
         }).execute()
 
     except Exception as e:
-
-        print(
-            f"[DOWNLOAD LOG ERROR] {str(e)}"
-        )
+        print(f"[DOWNLOAD LOG ERROR] {e}")
 
 
 # ==========================================
-# LICENSE VALIDATION
+# LICENSE VALIDATION (FIXED + SAFE)
 # ==========================================
 
-def validate_download_license(
-    email: str,
-    license_key: str
-):
+def validate_download_license(email: str, license_key: str):
 
     try:
+        # IMPORTANT FIX:
+        # we validate using api_key (NOT license_key column)
 
         result = (
             supabase.table("licenses")
             .select("*")
             .eq("user_email", email)
-            .eq("license_key", license_key)
+            .eq("api_key", license_key)
             .eq("status", "active")
+            .limit(1)
             .execute()
         )
 
         if not result.data:
-
             return {
                 "valid": False,
                 "reason": "INVALID_LICENSE"
@@ -207,23 +168,19 @@ def validate_download_license(
 
         license_data = result.data[0]
 
-        expires_at = license_data.get(
-            "expires_at"
-        )
+        # ==========================================
+        # EXPIRY CHECK (SAFE)
+        # ==========================================
+
+        expires_at = license_data.get("expires_at")
 
         if expires_at:
-
             try:
-
                 expiry = datetime.fromisoformat(
-                    expires_at.replace(
-                        "Z",
-                        "+00:00"
-                    )
+                    expires_at.replace("Z", "+00:00")
                 )
 
                 if expiry < datetime.utcnow().astimezone():
-
                     return {
                         "valid": False,
                         "reason": "LICENSE_EXPIRED"
@@ -238,8 +195,7 @@ def validate_download_license(
         }
 
     except Exception as e:
-
         return {
             "valid": False,
-            "reason": str(e)
+            "reason": "LICENSE_VALIDATION_ERROR"
         }
