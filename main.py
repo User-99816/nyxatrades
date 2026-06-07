@@ -18,6 +18,7 @@ from api.routes.signal_routes import router as signal_router
 from api.routes.trade_routes import router as trade_router
 from api.routes.execution_routes import router as execution_router
 from api.routes.download_routes import router as download_router
+from api.routes.trial_routes import router as trial_router
 
 # ==========================================
 # REAL-TIME SYSTEM
@@ -38,9 +39,8 @@ from core.events.event_bus import event_bus
 from services.ai_orchestrator_v2 import ai_orchestrator_v2
 from services.execution_router_v2 import execution_router_v2
 
-
 # ==========================================
-# PLAN SYSTEM (NEW ADDITION)
+# PLAN SYSTEM
 # ==========================================
 
 from config.supabase_client import supabase
@@ -50,23 +50,26 @@ def get_user_plan(email: str):
     """
     Fetch user plan from Supabase license table
     """
+
     try:
+
         res = (
             supabase.table("licenses")
-            .select("plan, status, expires_at")
+            .select("plan,status,expires_at")
             .eq("user_email", email)
+            .limit(1)
             .execute()
         )
 
         if not res.data:
             return "trial"
 
-        license = res.data[0]
+        license_record = res.data[0]
 
-        if license["status"] != "active":
+        if license_record.get("status") != "active":
             return "trial"
 
-        return license.get("plan", "trial")
+        return license_record.get("plan", "trial")
 
     except Exception:
         return "trial"
@@ -79,7 +82,7 @@ def get_user_plan(email: str):
 app = FastAPI(
     title="NYXA Trading OS",
     description="AI-driven institutional trading backend",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # ==========================================
@@ -102,9 +105,22 @@ app.include_router(signal_router)
 app.include_router(trade_router)
 app.include_router(execution_router)
 app.include_router(download_router)
+app.include_router(trial_router)
 
 # ==========================================
-# PLAN-AWARE SYSTEM STATUS (UPGRADED)
+# ROOT
+# ==========================================
+
+@app.get("/")
+def root():
+    return {
+        "name": "NYXA Trading OS",
+        "status": "ONLINE",
+        "version": "2.1.0"
+    }
+
+# ==========================================
+# PLAN-AWARE SYSTEM STATUS
 # ==========================================
 
 @app.get("/system/status")
@@ -119,25 +135,29 @@ def system_status():
         "ai_orchestrator": "ACTIVE",
         "execution_router": "ACTIVE",
         "secure_downloads": "ACTIVE",
-        "plans": ["trial", "lite", "pro"]
+        "trial_system": "ACTIVE",
+        "plans": [
+            "trial",
+            "starter",
+            "pro"
+        ]
     }
 
+
 # ==========================================
-# TEST SIGNAL (PLAN AWARE)
+# TEST SIGNAL PIPELINE
 # ==========================================
 
 @app.post("/system/test-signal")
 async def test_signal(payload: dict):
 
-    user_email = payload.get("user_email", "test@system.com")
-
-    # ==========================================
-    # GET USER PLAN (NEW)
-    # ==========================================
+    user_email = payload.get(
+        "user_email",
+        "test@system.com"
+    )
 
     plan = get_user_plan(user_email)
 
-    # Attach plan to payload for AI engine
     payload["plan"] = plan
 
     # ==========================================
@@ -183,7 +203,7 @@ async def test_signal(payload: dict):
 
 
 # ==========================================
-# EVENT STREAM ACCESS
+# EVENTS
 # ==========================================
 
 @app.get("/system/events")
@@ -193,10 +213,6 @@ def get_events(limit: int = 100):
         "events": event_bus.get_history(limit=limit)
     }
 
-
-# ==========================================
-# EVENT HISTORY
-# ==========================================
 
 @app.get("/system/event-history")
 def event_history(limit: int = 100):
@@ -222,8 +238,9 @@ async def startup_event():
         "SYSTEM_STARTED",
         {
             "message": "Trading OS online",
-            "version": "2.0.0",
-            "plans_enabled": True
+            "version": "2.1.0",
+            "plans_enabled": True,
+            "trial_system": True
         }
     )
 
@@ -255,5 +272,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=port
+        port=port,
+        reload=True
     )
