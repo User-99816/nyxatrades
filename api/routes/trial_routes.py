@@ -12,92 +12,87 @@ router = APIRouter(
 
 
 # ==========================================
-# START FREE TRIAL
+# START FREE TRIAL (PRODUCTION READY)
 # ==========================================
 
 @router.post("/start")
 def start_trial():
 
     try:
+        print("[TRIAL] Starting new trial...")
 
         # ==========================================
-        # GENERATE REAL LICENSE
+        # GENERATE CREDENTIALS
         # ==========================================
+        license_key = "NYXA-" + secrets.token_hex(4).upper()
+        api_key = "NYXA-API-" + secrets.token_hex(8).upper()
 
-        license_key = (
-            "NYXA-" +
-            secrets.token_hex(4).upper()
-        )
+        email = f"trial_{secrets.token_hex(4)}@nyxa.local"
 
-        api_key = (
-            "NYXA-API-" +
-            secrets.token_hex(8).upper()
-        )
-
-        # Trial placeholder email
-        # Replace later with authenticated user email
-        email = (
-            f"trial_{secrets.token_hex(4)}@nyxa.local"
-        )
-
-        expires_at = (
-            datetime.utcnow() +
-            timedelta(hours=1)
-        )
+        expires_at = datetime.utcnow() + timedelta(hours=1)
 
         # ==========================================
-        # SAVE LICENSE TO SUPABASE
+        # SAVE TO SUPABASE
         # ==========================================
+        insert_result = supabase.table("licenses").insert({
+            "user_email": email,
+            "license_key": license_key,
+            "api_key": api_key,
+            "status": "active",
+            "plan": "trial",
+            "expires_at": expires_at.isoformat()
+        }).execute()
 
-        insert_result = (
-            supabase.table("licenses")
-            .insert({
-                "user_email": email,
-                "license_key": license_key,
-                "api_key": api_key,
-                "status": "active",
-                "plan": "trial",
-                "expires_at": expires_at.isoformat()
-            })
-            .execute()
-        )
-
-        if not insert_result.data:
+        # IMPORTANT: Proper Supabase error handling
+        if insert_result.error:
+            print("[TRIAL ERROR] Supabase insert failed:", insert_result.error)
 
             return {
                 "success": False,
-                "message": "LICENSE_CREATION_FAILED"
+                "message": "LICENSE_CREATION_FAILED",
+                "error": str(insert_result.error)
             }
 
-        # ==========================================
-        # CREATE DOWNLOAD TOKEN
-        # ==========================================
+        print("[TRIAL] License stored successfully")
 
+        # ==========================================
+        # CREATE DOWNLOAD TOKEN (FIXED)
+        # ==========================================
         download_token = create_download_token(
-            license_key=api_key,
+            license_key=license_key,
             email=email
         )
+
+        if not download_token:
+            print("[TRIAL ERROR] Token generation failed")
+
+            return {
+                "success": False,
+                "message": "TOKEN_CREATION_FAILED"
+            }
+
+        print("[TRIAL] Download token created")
 
         # ==========================================
         # RESPONSE
         # ==========================================
-
-        return {
+        response = {
             "success": True,
-            "message": "Trial Created",
+            "message": "Trial Created Successfully",
             "email": email,
             "license_key": license_key,
             "api_key": api_key,
             "download_token": download_token,
             "expires_at": expires_at.isoformat(),
-            "download_url": (
-                f"/download/ea?token={download_token}"
-            )
+            "download_url": f"/download/ea?token={download_token}"
         }
 
-    except Exception as e:
+        print("[TRIAL] Response ready:", response)
 
-        print(f"[TRIAL ERROR] {str(e)}")
+        return response
+
+    except Exception as e:
+        print("[TRIAL FATAL ERROR]", str(e))
 
         return {
             "success": False,
