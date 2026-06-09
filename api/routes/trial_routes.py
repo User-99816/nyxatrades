@@ -43,20 +43,21 @@ def start_trial():
             "expires_at": expires_at.isoformat()
         }).execute()
 
-        # IMPORTANT: Proper Supabase error handling
-        if insert_result.error:
-            print("[TRIAL ERROR] Supabase insert failed:", insert_result.error)
+        # ==========================================
+        # FIXED SUPABASE v2 CHECK (IMPORTANT)
+        # ==========================================
+        if not insert_result.data:
+            print("[TRIAL ERROR] Supabase insert failed or returned empty data")
 
             return {
                 "success": False,
-                "message": "LICENSE_CREATION_FAILED",
-                "error": str(insert_result.error)
+                "message": "LICENSE_CREATION_FAILED"
             }
 
         print("[TRIAL] License stored successfully")
 
         # ==========================================
-        # CREATE DOWNLOAD TOKEN (FIXED)
+        # CREATE DOWNLOAD TOKEN
         # ==========================================
         download_token = create_download_token(
             license_key=license_key,
