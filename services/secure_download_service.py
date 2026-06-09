@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from config.supabase_client import supabase
 
-
 # ==========================================
 # CONFIG
 # ==========================================
@@ -20,11 +19,9 @@ DOWNLOAD_EXPIRY_MINUTES = int(
     os.getenv("DOWNLOAD_EXPIRY_MINUTES", "10")
 )
 
-
 # ==========================================
-# CREATE DOWNLOAD TOKEN
+# CREATE DOWNLOAD TOKEN (SECURE)
 # ==========================================
-
 def create_download_token(license_key: str, email: str):
 
     payload = {
@@ -50,11 +47,9 @@ def create_download_token(license_key: str, email: str):
 
     return token
 
-
 # ==========================================
-# VERIFY TOKEN (SAFE + FALLBACK MODE FIX)
+# VERIFY TOKEN (STRICT MODE)
 # ==========================================
-
 def verify_download_token(token: str):
 
     if not token:
@@ -67,21 +62,30 @@ def verify_download_token(token: str):
             algorithms=[ALGORITHM]
         )
 
-        result = (
-            supabase.table("download_tokens")
-            .select("*")
-            .eq("token", token)
-            .limit(1)
+        result = supabase.table("download_tokens") \
+            .select("*") \
+            .eq("token", token) \
+            .limit(1) \
             .execute()
-        )
 
         if not result.data:
             return {"valid": False, "error": "TOKEN_NOT_FOUND"}
 
         record = result.data[0]
 
-        if record.get("used") is True:
+        # ==========================================
+        # BLOCK REPLAY ATTACKS
+        # ==========================================
+        if record.get("used"):
             return {"valid": False, "error": "TOKEN_ALREADY_USED"}
+
+        # ==========================================
+        # TOKEN EXPIRED (DB LEVEL CHECK)
+        # ==========================================
+        if record.get("created_at"):
+            created = datetime.fromisoformat(record["created_at"])
+            if datetime.utcnow() > created + timedelta(minutes=DOWNLOAD_EXPIRY_MINUTES):
+                return {"valid": False, "error": "TOKEN_EXPIRED"}
 
         return {
             "valid": True,
@@ -95,17 +99,15 @@ def verify_download_token(token: str):
             "error": f"JWT_INVALID: {str(e)}"
         }
 
-    except Exception:
+    except Exception as e:
         return {
             "valid": False,
-            "error": "TOKEN_VERIFICATION_FAILED"
+            "error": f"TOKEN_VERIFICATION_FAILED: {str(e)}"
         }
-
 
 # ==========================================
 # MARK TOKEN AS USED
 # ==========================================
-
 def mark_token_used(token: str):
 
     try:
@@ -117,11 +119,9 @@ def mark_token_used(token: str):
     except Exception as e:
         print(f"[TOKEN UPDATE ERROR] {e}")
 
-
 # ==========================================
-# LOG DOWNLOAD
+# LOG DOWNLOAD ACTIVITY
 # ==========================================
-
 def log_download(license_key: str, email: str, ip_address: str, user_agent: str):
 
     try:
@@ -136,55 +136,31 @@ def log_download(license_key: str, email: str, ip_address: str, user_agent: str)
     except Exception as e:
         print(f"[DOWNLOAD LOG ERROR] {e}")
 
-
 # ==========================================
-# LICENSE VALIDATION (🔥 FIXED ROOT ISSUE)
+# LICENSE VALIDATION (PRODUCTION SAFE)
 # ==========================================
-
 def validate_download_license(email: str, license_key: str):
 
     try:
-        # ==========================================
-        # 🔥 SAFETY FALLBACK MODE (FIXES YOUR ERROR)
-        # ==========================================
-        #
-        # If Supabase schema doesn't match frontend yet,
-        # we allow ANY active license to avoid blocking trial flow.
-
-        result = (
-            supabase.table("licenses")
-            .select("*")
-            .eq("status", "active")
-            .limit(1)
+        result = supabase.table("licenses") \
+            .select("*") \
+            .eq("user_email", email) \
+            .eq("api_key", license_key) \
+            .eq("status", "active") \
+            .limit(1) \
             .execute()
-        )
 
         if not result.data:
             return {
                 "valid": False,
-                "reason": "NO_ACTIVE_LICENSE_FOUND"
+                "reason": "LICENSE_NOT_FOUND"
             }
 
         license_data = result.data[0]
 
         # ==========================================
-        # OPTIONAL STRICT VALIDATION (IF SCHEMA FIXED)
+        # EXPIRY CHECK (STRICT)
         # ==========================================
-
-        db_email = license_data.get("user_email")
-        db_api = license_data.get("api_key")
-
-        if db_email and db_api:
-            if db_email != email or db_api != license_key:
-                return {
-                    "valid": False,
-                    "reason": "LICENSE_MISMATCH"
-                }
-
-        # ==========================================
-        # EXPIRY CHECK
-        # ==========================================
-
         expires_at = license_data.get("expires_at")
 
         if expires_at:
@@ -199,8 +175,11 @@ def validate_download_license(email: str, license_key: str):
                         "reason": "LICENSE_EXPIRED"
                     }
 
-            except Exception:
-                pass
+            except Exception as e:
+                return {
+                    "valid": False,
+                    "reason": "INVALID_EXPIRY"
+                }
 
         return {
             "valid": True,
