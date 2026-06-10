@@ -1,6 +1,5 @@
 from pathlib import Path
-
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Query
 from fastapi.responses import FileResponse
 
 from services.secure_download_service import (
@@ -11,10 +10,20 @@ from services.secure_download_service import (
     mark_token_used
 )
 
+from config.supabase_client import supabase
+from datetime import datetime
+
 router = APIRouter(
     prefix="/download",
     tags=["Downloads"]
 )
+
+# ==========================================
+# CONFIG
+# ==========================================
+
+EA_FILE = Path("downloads/nyxatrades_ea.ex5")
+
 
 # ==========================================
 # GENERATE SECURE DOWNLOAD LINK
@@ -29,9 +38,12 @@ def generate_download(payload: dict):
     if not email or not license_key:
         return {
             "allowed": False,
-            "message": "Missing Credentials"
+            "message": "MISSING_CREDENTIALS"
         }
 
+    # ==========================================
+    # LICENSE VALIDATION (STRICT)
+    # ==========================================
     validation = validate_download_license(
         email=email,
         license_key=license_key
@@ -43,6 +55,9 @@ def generate_download(payload: dict):
             "message": validation["reason"]
         }
 
+    # ==========================================
+    # CREATE DOWNLOAD TOKEN
+    # ==========================================
     token = create_download_token(
         license_key=license_key,
         email=email
@@ -50,89 +65,116 @@ def generate_download(payload: dict):
 
     return {
         "allowed": True,
-        "message": "Download Approved",
+        "message": "DOWNLOAD_APPROVED",
         "token": token,
         "download_url": f"/download/ea?token={token}"
     }
 
 
 # ==========================================
-# DOWNLOAD EA (HYBRID SAFE MODE + SECURE MODE)
+# DOWNLOAD EA (SAAS-GRADE SECURITY)
 # ==========================================
 
 @router.get("/ea")
 async def download_ea(
     request: Request,
-    token: str = None
+    token: str = Query(None)
 ):
 
-    ea_file = Path("downloads/nyxatrades_ea.ex5")
+    # ==========================================
+    # 1. FILE CHECK FIRST (FAIL FAST)
+    # ==========================================
+    if not EA_FILE.exists():
+        return {
+            "allowed": False,
+            "message": "EA_FILE_MISSING"
+        }
 
     # ==========================================
-    # SAFE MODE (NO TOKEN = ALLOW DOWNLOAD)
+    # 2. IF NO TOKEN → BLOCK (SAAS SECURITY FIX)
     # ==========================================
-    # This prevents "missing token" blocking your users in production MVP
-
     if not token:
-
-        log_download(
-            license_key="MVP_NO_TOKEN",
-            email="unknown",
-            ip_address=request.client.host,
-            user_agent=request.headers.get("user-agent", "unknown")
-        )
-
-        if not ea_file.exists():
-            return {
-                "allowed": False,
-                "message": "EA File Not Found"
-            }
-
-        return FileResponse(
-            path=str(ea_file),
-            filename="NyxaTradesEA.ex5",
-            media_type="application/octet-stream"
-        )
+        return {
+            "allowed": False,
+            "message": "MISSING_TOKEN"
+        }
 
     # ==========================================
-    # SECURE MODE (TOKEN PROVIDED)
+    # 3. VERIFY TOKEN
     # ==========================================
-
     verification = verify_download_token(token)
 
     if not verification.get("valid"):
-
         return {
             "allowed": False,
             "message": verification.get("error", "INVALID_TOKEN")
         }
 
     data = verification["data"]
+    record = verification["record"]
 
     license_key = data["license_key"]
     email = data["email"]
 
-    # Mark token as used (anti-sharing protection)
-    mark_token_used(token)
-
-    # Log download event
-    log_download(
-        license_key=license_key,
-        email=email,
-        ip_address=request.client.host,
-        user_agent=request.headers.get("user-agent", "unknown")
+    # ==========================================
+    # 4. LICENSE DOUBLE CHECK (ANTI BYPASS)
+    # ==========================================
+    license_check = (
+        supabase.table("licenses")
+        .select("status, expires_at")
+        .eq("license_key", license_key)
+        .limit(1)
+        .execute()
     )
 
-    # Check file existence
-    if not ea_file.exists():
-        return {
-            "allowed": False,
-            "message": "EA File Not Found"
-        }
+    if not license_check.data:
+        return {"allowed": False, "message": "LICENSE_NOT_FOUND"}
 
-    # Return actual EA file download
+    license_data = license_check.data[0]
+
+    if license_data.get("status") != "active":
+        return {"allowed": False, "message": "LICENSE_INACTIVE"}
+
+    expires_at = license_data.get("expires_at")
+
+    if expires_at:
+        try:
+            expiry = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            )
+
+            if expiry < datetime.utcnow().astimezone():
+                return {"allowed": False, "message": "LICENSE_EXPIRED"}
+
+        except Exception:
+            pass
+
+    # ==========================================
+    # 5. MARK TOKEN USED (ANTI-SHARING)
+    # ==========================================
+    try:
+        mark_token_used(token)
+    except Exception as e:
+        print("[TOKEN ERROR]", str(e))
+
+    # ==========================================
+    # 6. LOG DOWNLOAD (AUDIT TRAIL)
+    # ==========================================
+    try:
+        log_download(
+            license_key=license_key,
+            email=email,
+            ip_address=request.client.host,
+            user_agent=request.headers.get("user-agent", "unknown")
+        )
+    except Exception as e:
+        print("[LOG ERROR]", str(e))
+
+    # ==========================================
+    # 7. FORCE DOWNLOAD EA FILE
+    # ==========================================
     return FileResponse(
-        path=str(ea_file),
+        path=str(EA_FILE),
         filename="NyxaTradesEA.ex5",
         media_type="application/octet-stream"
     )
