@@ -19,6 +19,7 @@ from api.routes.trade_routes import router as trade_router
 from api.routes.execution_routes import router as execution_router
 from api.routes.download_routes import router as download_router
 from api.routes.trial_routes import router as trial_router
+from api.routes.license_routes import router as license_router
 
 # ==========================================
 # REAL-TIME SYSTEM
@@ -106,6 +107,7 @@ app.include_router(trade_router)
 app.include_router(execution_router)
 app.include_router(download_router)
 app.include_router(trial_router)
+app.include_router(license_router)
 
 # ==========================================
 # ROOT
